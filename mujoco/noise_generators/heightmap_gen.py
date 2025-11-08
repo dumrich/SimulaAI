@@ -1,0 +1,3 @@
+from perlin_noise_gen import generate_perlin_image
+from simplex_noise_gen import generate_simplex_image
+
