@@ -17,8 +17,8 @@ import os
 api = FastAPI()
 
 
-# Request model for generating simulation
-class GenerateSimulationRequest(BaseModel):
+# Request model for generating simulation / prompts 
+class Prompt(BaseModel):
     prompt: str = Field(..., description="User prompt describing the desired simulation")
 
 
@@ -28,8 +28,9 @@ class GenerateSimulationResponse(BaseModel):
     model_xml: str = Field(..., description="Complete MuJoCo XML string for the simulation")
 
 
+### first chat bot request at the beginning 
 @api.post('/simulation/generate', response_model=GenerateSimulationResponse)
-def generate_simulation(request: GenerateSimulationRequest):
+def generate_simulation(request: Prompt):
     try:
         # Generate a unique simulation ID
         simulation_id = f"sim_{uuid.uuid4().hex[:8]}" ## may or may not need this 
@@ -59,7 +60,19 @@ def refine_simulation(request: RefineSimulationRequest):
     user_prompt = request.prompt
     
     #### return refine(simulation_id, current_model_xml, user_prompt) call refine fucntion form other file;
+
+# response call for true/false confirmation of prompt
+class responseConfirmation(BaseModel):
+    status : bool  
+
+# LLM chat bot function 
+@api.post('/config/system_prompt', response_model = responseConfirmation)
+def handlePrompt(request: Prompt):
     
+    ### add function to querry the prompt for chat 
+    success = bool ### add correct fucntion call here 
+    return responseConfirmation(status = success)
+
 
     
     
