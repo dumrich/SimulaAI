@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
+    "dev": "next dev --webpack",
     "build": "next build",
     "start": "next start",
     "lint": "eslint"
@@ -12,6 +12,7 @@
     "@react-three/drei": "^10.7.6",
     "@react-three/fiber": "^9.4.0",
     "lucide-react": "^0.553.0",
+    "mujoco-js": "^0.0.7",
     "next": "16.0.1",
     "react": "19.2.0",
     "react-dom": "19.2.0",

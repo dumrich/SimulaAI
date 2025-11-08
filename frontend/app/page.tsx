@@ -203,12 +203,11 @@ function SimulationLayout() {
 // 3. Re-usable components (Placeholders for now)
 // ------------------------------------------------------------------
 
-// <-- FIX 2: Correct URL for the model file -->
 // This points to 'frontend/public/model.xml'
 const MODEL_XML_URL = '/model.xml';
 
-// This is the CDN link for the mujoco.js library
-const MUJOCO_SCRIPT_URL = 'https://cdn.jsdelivr.net/gh/zalo/mujoco_wasm@main/mujoco.js'; // Changed to 'main' branch
+// MuJoCo will be loaded directly from public directory to avoid webpack bundling issues
+const MUJOCO_WASM_URL = '/mujoco_wasm.js';
 
 
 /**
@@ -258,63 +257,159 @@ function PhysicsScene({ isRunning, resetTrigger }: { isRunning: boolean, resetTr
 
   // 1. Load the Mujoco library and the physics model (XML)
   useEffect(() => {
-    // Function to load the external mujoco.js script
-    const loadScript = (src: string): Promise<void> => {
-      return new Promise((resolve, reject) => {
-        // Prevent loading the script multiple times
-        if (document.querySelector(`script[src="${src}"]`)) {
-          resolve();
-          return;
-        }
-        const script = document.createElement('script');
-        script.src = src;
-        script.async = true;
-        script.onload = () => resolve();
-        script.onerror = (err) => reject(err);
-        document.body.appendChild(script);
-      });
-    };
+    // Ensure we're on the client side
+    if (typeof window === 'undefined') {
+      return;
+    }
 
     // Function to initialize the physics engine
     const initPhysics = async () => {
       try {
-        // Load the mujoco.js script
-        await loadScript(MUJOCO_SCRIPT_URL);
-        console.log("Mujoco script loaded.");
-
-        // The 'Mujoco' function is now available on the window object
-        if (!(window as any).Mujoco) {
-          throw new Error("Mujoco function not found on window. Ensure script loaded.");
+        console.log("Starting MuJoCo initialization...");
+        
+        // Load mujoco_wasm.js directly from public directory using dynamic import
+        // This avoids webpack bundling issues
+        console.log(`Loading mujoco_wasm.js from: ${MUJOCO_WASM_URL}`);
+        let loadMujoco: any;
+        try {
+          // Use dynamic import to load the ES6 module from public directory
+          // Use Function constructor to prevent webpack from trying to bundle it
+          const importModule = new Function('url', 'return import(url)');
+          const mujocoModule = await importModule(MUJOCO_WASM_URL);
+          // The module exports loadMujoco as default
+          loadMujoco = mujocoModule.default;
+          if (!loadMujoco || typeof loadMujoco !== 'function') {
+            throw new Error("loadMujoco not found or is not a function in mujoco_wasm.js module");
+          }
+          console.log("✓ mujoco_wasm.js loaded successfully.");
+        } catch (loadError: any) {
+          const errorMsg = loadError instanceof Error ? loadError.message : String(loadError);
+          throw new Error(`Failed to load mujoco_wasm.js: ${errorMsg}. Check that the file exists in the public directory.`);
         }
 
         // Wait for the Wasm module to be ready
-        const mujocoInstance = await (window as any).Mujoco();
+        console.log("Initializing MuJoCo Wasm module...");
+        const mujocoInstance = await loadMujoco();
+        if (!mujocoInstance) {
+          throw new Error("Failed to initialize MuJoCo Wasm module");
+        }
+        if (!mujocoInstance.FS) {
+          throw new Error("MuJoCo instance missing FS (filesystem) module");
+        }
+        if (!mujocoInstance.MjModel) {
+          throw new Error("MuJoCo instance missing MjModel class");
+        }
+        if (!mujocoInstance.MjData) {
+          throw new Error("MuJoCo instance missing MjData class");
+        }
         setMujoco(mujocoInstance);
-        console.log("Mujoco Wasm module initialized.");
+        console.log("✓ MuJoCo Wasm module initialized.");
 
         // Fetch the model XML file
-        const response = await fetch(MODEL_XML_URL); // This now fetches '/model.xml'
+        console.log(`Fetching model from: ${MODEL_XML_URL}`);
+        const response = await fetch(MODEL_XML_URL);
         if (!response.ok) {
-          throw new Error(`Failed to fetch model: ${response.statusText}`);
+          throw new Error(`Failed to fetch model: ${response.status} ${response.statusText}. Check that model.xml exists in the public directory.`);
         }
         const modelXML = await response.text();
-        console.log("Model XML fetched.");
+        if (!modelXML || modelXML.trim().length === 0) {
+          throw new Error("Model XML file is empty");
+        }
+        console.log("✓ Model XML fetched successfully.");
+
+        // Set up the virtual filesystem (VFS) working directory
+        // Create a working directory and mount MEMFS
+        const workingDir = '/working';
+        try {
+          mujocoInstance.FS.mkdir(workingDir);
+          console.log(`✓ Created working directory: ${workingDir}`);
+        } catch (mkdirError: any) {
+          // Directory might already exist, which is fine
+          if (mkdirError && mkdirError.errno !== 17) { // 17 is EEXIST (directory exists)
+            console.warn(`Warning creating working directory: ${mkdirError}`);
+          }
+        }
+
+        // Mount MEMFS to the working directory
+        try {
+          mujocoInstance.FS.mount(mujocoInstance.MEMFS, { root: '.' }, workingDir);
+          console.log("✓ Mounted MEMFS to working directory.");
+        } catch (mountError: any) {
+          // Mount might already exist, which is fine
+          console.warn(`Warning mounting MEMFS: ${mountError}`);
+        }
 
         // Write the model to the virtual filesystem (VFS)
-        mujocoInstance.FS.writeFile('model.xml', modelXML);
+        // Use absolute path in the working directory
+        const vfsPath = `${workingDir}/model.xml`;
+        console.log(`Writing model to virtual filesystem at: ${vfsPath}`);
+        mujocoInstance.FS.writeFile(vfsPath, modelXML);
+        console.log("✓ Model written to virtual filesystem.");
 
-        // Load the model into the physics engine
-        const model = mujocoInstance.loadModel('model.xml');
-        // Initialize the simulation data structure
-        const data = mujocoInstance.initData(model);
+        // Verify the file was written
+        try {
+          const writtenContent = mujocoInstance.FS.readFile(vfsPath, { encoding: 'utf8' });
+          if (!writtenContent || writtenContent.length === 0) {
+            throw new Error("File written to VFS but appears empty");
+          }
+          console.log("✓ Verified model file in virtual filesystem.");
+        } catch (verifyError) {
+          throw new Error(`Failed to verify model file in VFS: ${verifyError}`);
+        }
+
+        // Load the model into the physics engine using MjModel.loadFromXML
+        console.log("Loading model into physics engine...");
+        const model = mujocoInstance.MjModel.loadFromXML(vfsPath);
+        if (!model) {
+          throw new Error("MjModel.loadFromXML returned null or undefined");
+        }
+        console.log("✓ Model loaded into physics engine.");
+        
+        // Initialize the simulation data structure using MjData constructor
+        const data = new mujocoInstance.MjData(model);
+        if (!data) {
+          throw new Error("MjData constructor returned null or undefined");
+        }
+        console.log("✓ Simulation data initialized.");
         
         setPhysicsModel(model);
         setPhysicsData(data);
         
-        console.log("%cPhysics simulation is ready!", "color: #00FF00; font-weight: bold;");
+        console.log("%c✓ Physics simulation is ready!", "color: #00FF00; font-weight: bold;");
 
       } catch (error) {
-        console.error("Error initializing physics:", error);
+        // Improved error logging - properly serialize error
+        let errorMessage = 'Unknown error';
+        let errorStack = undefined;
+        let errorName = undefined;
+        
+        if (error instanceof Error) {
+          errorMessage = error.message || 'Error without message';
+          errorStack = error.stack;
+          errorName = error.name;
+        } else if (typeof error === 'string') {
+          errorMessage = error;
+        } else if (error && typeof error === 'object') {
+          // Try to extract message from error object
+          errorMessage = (error as any).message || (error as any).toString() || JSON.stringify(error);
+        } else {
+          errorMessage = String(error);
+        }
+        
+        console.error("❌ Error initializing physics:");
+        console.error("  Error Name:", errorName || 'N/A');
+        console.error("  Error Message:", errorMessage);
+        if (errorStack) {
+          console.error("  Error Stack:", errorStack);
+        }
+        console.error("  Full Error Object:", error);
+        
+        // Also log to help with debugging
+        console.error("Debug info:", {
+          modelXmlUrl: MODEL_XML_URL,
+          windowMujoco: !!(window as any).Mujoco,
+          mujocoJsInstalled: true // We're using npm package now
+        });
       }
     };
 
@@ -322,10 +417,7 @@ function PhysicsScene({ isRunning, resetTrigger }: { isRunning: boolean, resetTr
 
     // Cleanup function
     return () => {
-      const script = document.querySelector(`script[src="${MUJOCO_SCRIPT_URL}"]`);
-      if (script) {
-        // In a real app, you'd handle cleanup
-      }
+      // Cleanup handled automatically
     };
   }, []); // Empty dependency array ensures this runs only once on mount
 
@@ -333,7 +425,14 @@ function PhysicsScene({ isRunning, resetTrigger }: { isRunning: boolean, resetTr
   useEffect(() => {
     if (resetTrigger > 0 && mujoco && physicsModel && physicsData) {
       console.log("Resetting physics simulation state...");
-      mujoco.resetData(physicsModel, physicsData);
+      // MjData has a reset method
+      if (physicsData.reset) {
+        physicsData.reset();
+      } else {
+        // Fallback: create new data
+        const newData = new mujoco.MjData(physicsModel);
+        setPhysicsData(newData);
+      }
     }
   }, [resetTrigger, mujoco, physicsModel, physicsData]); // Dependencies
 
@@ -343,7 +442,8 @@ function PhysicsScene({ isRunning, resetTrigger }: { isRunning: boolean, resetTr
     if (isRunning && mujoco && physicsModel && physicsData && boxRef.current) {
       
       // --- PHYSICS ---
-      mujoco.step(physicsModel, physicsData);
+      // Use mj_step from the mujoco instance
+      mujoco.mj_step(physicsModel, physicsData);
 
       // --- VISUALS ---
       // Get the position and orientation of the box from the physics simulation.
