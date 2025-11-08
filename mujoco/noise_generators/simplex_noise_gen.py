@@ -1,6 +1,7 @@
-# simplex_cpu.py
-# Pure Python 2D Simplex noise + image generation
-# Requires: Pillow  (pip install pillow)
+# simplex_tileable.py
+# Tileable 2D Simplex noise heightmap
+# pip install pillow
+
 import math
 import random
 from PIL import Image
@@ -23,7 +24,7 @@ class Simplex:
         self.G2 = (3.0 - math.sqrt(3.0)) / 6.0
 
     def noise2d(self, xin, yin):
-        # Skew coordinates
+        # Standard 2D Simplex noise in [-1, 1]
         s = (xin + yin) * self.F2
         i = math.floor(xin + s)
         j = math.floor(yin + s)
@@ -52,29 +53,53 @@ class Simplex:
 
         n0 = n1 = n2 = 0.0
 
-        # Corner 0
         t0 = 0.5 - x0 * x0 - y0 * y0
         if t0 >= 0:
             t0 *= t0
             g = self.grad3[gi0]
             n0 = t0 * t0 * (g[0] * x0 + g[1] * y0)
 
-        # Corner 1
         t1 = 0.5 - x1 * x1 - y1 * y1
         if t1 >= 0:
             t1 *= t1
             g = self.grad3[gi1]
             n1 = t1 * t1 * (g[0] * x1 + g[1] * y1)
 
-        # Corner 2
         t2 = 0.5 - x2 * x2 - y2 * y2
         if t2 >= 0:
             t2 *= t2
             g = self.grad3[gi2]
             n2 = t2 * t2 * (g[0] * x2 + g[1] * y2)
 
-        # Scale result to roughly [-1, 1]
+        # Scale result (empirical factor)
         return 70.0 * (n0 + n1 + n2)
+
+
+def tileable_simplex_2d(noise, x, y, period_x, period_y):
+    """
+    Tileable noise via 4-corner blending.
+
+    period_x, period_y are in "noise space" units.
+    The result is periodic with those periods.
+    """
+    # Normalize to [0,1] for blending weights
+    u = x / period_x
+    v = y / period_y
+
+    # Four corners sampled with shifts equal to the period:
+    n00 = noise(x,          y)
+    n10 = noise(x - period_x, y)
+    n01 = noise(x,          y - period_y)
+    n11 = noise(x - period_x, y - period_y)
+
+    # Bilinear blend between 4 tiles
+    return (
+        (1 - u) * (1 - v) * n00 +
+        u       * (1 - v) * n10 +
+        (1 - u) * v       * n01 +
+        u       * v       * n11
+    )
+
 
 def generate_simplex_image(
     width=512,
@@ -84,46 +109,55 @@ def generate_simplex_image(
     persistence=0.5,
     lacunarity=2.0,
     seed=42,
-    path="simplex.png",
+    path="simplex_tile.png",
 ):
     """
-    Generate a simplex heightmap file for height field
+    Generates a seamless/tileable simplex noise heightmap.
 
-    Args:
-        width (int): width of the image
-        height (int): height of the image
-        scale (float): noisiness of the heightmap (smaller = more noisy)
-        octaves (int): number of "layers" of noise blended together (higher = more structured)
-        persistence (float): influence each successive octave has (smaller = smoother)
-        lacunarity (float): speed at which frequency increases per octave (higher = more chaotic)
-        seed (int): seed of the random number generator
-        path (str): output file path
+    When you repeat simplex_tile.png in a grid, edges line up cleanly.
     """
-
     simplex = Simplex(seed)
     img = Image.new("L", (width, height))
     pixels = img.load()
 
-    for y in range(height):
-        for x in range(width):
-            amplitude = 1.0
-            frequency = 1.0
+    # Choose tile period in noise space.
+    # We match it to the scaled image size so 1 tile = this image.
+    period_x = width / scale
+    period_y = height / scale
+
+    for py in range(height):
+        for px in range(width):
+            amp = 1.0
+            freq = 1.0
             value = 0.0
             max_amp = 0.0
 
+            # Map pixel to base noise-space coordinates
+            # (so that one image spans exactly [0, period_x], [0, period_y])
+            x = (px / (width - 1)) * period_x
+            y = (py / (height - 1)) * period_y
+
             for _ in range(octaves):
-                nx = (x / scale) * frequency
-                ny = (y / scale) * frequency
+                # Use tileable simplex at this octave
+                n = tileable_simplex_2d(
+                    simplex.noise2d,
+                    x * freq,
+                    y * freq,
+                    period_x * freq,
+                    period_y * freq,
+                )
 
-                value += simplex.noise2d(nx, ny) * amplitude
-                max_amp += amplitude
-                amplitude *= persistence
-                frequency *= lacunarity
+                value += n * amp
+                max_amp += amp
+                amp *= persistence
+                freq *= lacunarity
 
+            # Normalize: Simplex outputs roughly [-1,1] after scaling
             value /= max_amp
-            value = (value + 1.0) / 2.0  # map to [0,1]
+            # Map to [0,1]
+            value = (value + 1.0) / 2.0
             gray = int(max(0, min(255, value * 255)))
-            pixels[x, y] = gray
+            pixels[px, py] = gray
 
     img.save(path)
-    print(f"Saved {path}")
+    print(f"Saved {path} (tileable simplex)")
