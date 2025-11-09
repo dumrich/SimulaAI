@@ -124,7 +124,6 @@ def generate_mujoco_xml(prompt: str) -> str:
         
         if response.status_code == 200:
             data = response.json()
-            print(data)
             return xml_map.get(data['choices'][0]['message']['content'].strip(), None)
         else:
             raise HTTPException(status_code=response.status_code, detail=f"Request failed: {response.text}",)
