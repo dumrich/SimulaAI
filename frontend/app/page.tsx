@@ -1,31 +1,45 @@
 'use client'; // This directive is necessary for React hooks
 
-import React, { useState, useEffect, useRef, Suspense } from 'react'; // Import React hooks
-import * as THREE from 'three'; // <-- FIX 1: Import the THREE namespace
-// Import R3F and Drei components
-import { Canvas, useFrame } from '@react-three/fiber'; // Import useFrame for the render loop
-import { OrbitControls, Grid } from '@react-three/drei';
+// Removed all @react-three/fiber and THREE imports
+import React, { useState, useEffect, useRef } from 'react';
+// Import 'recharts' for graphs
+import {
+  LineChart,
+  Line,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  Legend,
+  ResponsiveContainer
+} from 'recharts';
 import { Play, Pause, RotateCcw, Bot, PanelLeft, PanelRight, Send, BrainCircuit } from 'lucide-react';
+
+// This is the shape of the simulation object we'll get from your API
+interface Simulation {
+  simulation_id: string;
+  model_xml: string;
+}
 
 /**
  * Main application page.
- * Uses state to show either the Chatbot entry
- * page or the full Simulation layout.
  */
 export default function Home() {
-  const [showSimulation, setShowSimulation] = useState(false);
+  // This state will hold the simulation details from your API
+  const [simulation, setSimulation] = useState<Simulation | null>(null);
 
-  // Callback function to switch to the simulation view
-  const handleChatSubmit = () => {
-    // Here you would eventually send the chat to the backend.
-    // For now, we just switch the view.
-    setShowSimulation(true);
+  // This callback now receives the API response
+  const handleChatSubmit = (apiResponse: Simulation) => {
+    setSimulation(apiResponse);
   };
 
   return (
     <main className="flex h-screen w-screen flex-col items-center justify-center bg-gray-900 text-white font-sans">
-      {showSimulation ? (
-        <SimulationLayout />
+      {/* We now pass the 'simulation' object to the layout.
+        If 'simulation' is null, show Chatbot. If it has data, show Layout.
+      */}
+      {simulation ? (
+        <SimulationLayout simulation={simulation} />
       ) : (
         <ChatbotEntry onChatSubmit={handleChatSubmit} />
       )}
@@ -34,15 +48,43 @@ export default function Home() {
 }
 
 // ------------------------------------------------------------------
-// 1. NEW: The initial chatbot entry component
+// 1. Chatbot entry component (Now calls your API)
 // ------------------------------------------------------------------
-function ChatbotEntry({ onChatSubmit }: { onChatSubmit: () => void }) {
+function ChatbotEntry({ onChatSubmit }: { onChatSubmit: (sim: Simulation) => void }) {
   const [prompt, setPrompt] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState('');
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (prompt.trim()) {
-      onChatSubmit(); // Call the callback to switch views
+    if (!prompt.trim()) return;
+
+    setIsLoading(true);
+    setError('');
+
+    try {
+      // *** THIS NOW CALLS YOUR FASTAPI ENDPOINT ***
+      // NOTE: Assumes your FastAPI is running on http://localhost:8000
+      const response = await fetch('http://localhost:8000/simulation/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt: prompt }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`API Error: ${response.statusText}`);
+      }
+
+      const simulationData: Simulation = await response.json();
+      
+      // Pass the simulation data back to the parent to switch views
+      onChatSubmit(simulationData);
+
+    } catch (err: any) {
+      setError(err.message);
+      console.error("Error generating simulation:", err);
+    } finally {
+      setIsLoading(false);
     }
   };
 
@@ -62,16 +104,23 @@ function ChatbotEntry({ onChatSubmit }: { onChatSubmit: () => void }) {
               type="text"
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
-              placeholder="e.g., 'Create a bipedal robot and make it walk'"
+              placeholder="e.g., 'Start training a bipedal walker'"
               className="w-full pl-6 pr-20 py-5 bg-gray-800 border border-gray-700 text-white rounded-full text-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all"
+              disabled={isLoading}
             />
             <button
               type="submit"
-              className="absolute right-3 top-1/2 -translate-y-1/2 bg-blue-600 text-white p-3 rounded-full hover:bg-blue-700 transition-colors"
+              className="absolute right-3 top-1/2 -translate-y-1/2 bg-blue-600 text-white p-3 rounded-full hover:bg-blue-700 transition-colors disabled:opacity-50"
+              disabled={isLoading}
             >
-              <Send size={24} />
+              {isLoading ? (
+                <div className="w-6 h-6 border-2 border-t-transparent border-white rounded-full animate-spin" />
+              ) : (
+                <Send size={24} />
+              )}
             </button>
           </div>
+          {error && <p className="text-red-400 mt-4">{error}</p>}
         </form>
       </div>
     </div>
@@ -80,21 +129,48 @@ function ChatbotEntry({ onChatSubmit }: { onChatSubmit: () => void }) {
 
 
 // ------------------------------------------------------------------
-// 2. UPDATED: The full simulation layout
+// 2. Main simulation layout (Now renders DashboardContainer)
 // ------------------------------------------------------------------
-
-/**
- * The main 3-panel simulation layout.
- * This component now also includes the overlay chat bar.
- */
-function SimulationLayout() {
+function SimulationLayout({ simulation }: { simulation: Simulation }) {
   const [isLeftSidebarOpen, setIsLeftSidebarOpen] = useState(true);
   const [isRightSidebarOpen, setIsRightSidebarOpen] = useState(true);
 
-  // NEW: State to control the simulation
-  const [isSimRunning, setIsSimRunning] = useState(true); // Start running by default
-  // NEW: State to trigger a reset. We just increment the number.
+  // This state will hold the most recent model_xml from the /refine endpoint
+  const [currentModelXml, setCurrentModelXml] = useState(simulation.model_xml);
+  const [isSimRunning, setIsSimRunning] = useState(true);
   const [resetTrigger, setResetTrigger] = useState(0);
+
+  // This handler calls your /simulation/refine endpoint
+  const handleRefineSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const form = e.target as HTMLFormElement;
+    const input = form.elements.namedItem('prompt') as HTMLInputElement;
+    const prompt = input.value;
+    if (!prompt) return;
+
+    try {
+      const response = await fetch('http://localhost:8000/simulation/refine', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          prompt: prompt,
+          simulation_id: simulation.simulation_id,
+          model_xml: currentModelXml, // Send the *current* XML
+        }),
+      });
+
+      if (!response.ok) throw new Error(`API Error: ${response.statusText}`);
+
+      const newSimData: Simulation = await response.json();
+      // Update the state with the new XML returned from the backend
+      setCurrentModelXml(newSimData.model_xml);
+      input.value = ''; // Clear input
+
+    } catch (err) {
+      console.error("Error refining simulation:", err);
+    }
+  };
+
 
   return (
     <div className="flex h-full w-full">
@@ -106,11 +182,10 @@ function SimulationLayout() {
         </div>
       )}
 
-      {/* Main Content Area (Viewport + Top Bar + Overlay Chat) */}
-      <div className="flex-1 flex flex-col h-full relative">
+      {/* Main Content Area */}
+      <div className="flex-1 flex flex-col h-full relative bg-gray-900">
         {/* Top Header/Toolbar */}
         <div className="flex items-center justify-between w-full h-14 bg-gray-800 border-b border-gray-700 px-4">
-          {/* Left-side controls (Sidebar Toggles) */}
           <div className="flex items-center gap-2">
             <button 
               onClick={() => setIsLeftSidebarOpen(!isLeftSidebarOpen)}
@@ -121,7 +196,7 @@ function SimulationLayout() {
             </button>
           </div>
           
-          {/* Simulation Controls - NOW WIRED UP */}
+          {/* Simulation Controls */}
           <div className="flex items-center gap-3">
             <button 
               onClick={() => setIsSimRunning(true)}
@@ -131,7 +206,7 @@ function SimulationLayout() {
                   : 'bg-gray-700 text-white hover:bg-gray-600'
               }`}
             >
-              <Play size={16} /> <span>Run</span>
+              <Play size={16} /> <span>Run Training</span>
             </button>
             <button 
               onClick={() => setIsSimRunning(false)}
@@ -141,7 +216,7 @@ function SimulationLayout() {
                   : 'bg-gray-700 text-white hover:bg-gray-600'
               }`}
             >
-              <Pause size={16} /> <span>Pause</span>
+              <Pause size={16} /> <span>Pause Training</span>
             </button>
             <button 
               onClick={() => setResetTrigger(v => v + 1)} // Increment trigger
@@ -151,7 +226,6 @@ function SimulationLayout() {
             </button>
           </div>
           
-          {/* Right-side controls (Sidebar Toggle) */}
           <div className="flex items-center gap-1">
             <button 
               onClick={() => setIsRightSidebarOpen(!isRightSidebarOpen)}
@@ -163,20 +237,25 @@ function SimulationLayout() {
           </div>
         </div>
 
-        {/* Main 3D Viewport Area - NOW PASSING PROPS */}
-        <div className="flex-1 w-full h-full bg-black overflow-hidden">
-          <SimulationViewport 
+        {/* ******* NEW: Main Dashboard Area ******* */}
+        <div className="flex-1 w-full h-full overflow-y-auto p-4">
+          <DashboardContainer
+            simulationId={simulation.simulation_id}
             isRunning={isSimRunning}
             resetTrigger={resetTrigger}
           />
         </div>
 
-        {/* NEW: Overlay Chat Bar */}
-        <div className="absolute bottom-6 left-1/2 -translate-x-1/2 w-full max-w-2xl px-4">
+        {/* Overlay Chat Bar - Now wired to your API */}
+        <form 
+          className="absolute bottom-6 left-1/2 -translate-x-1/2 w-full max-w-2xl px-4"
+          onSubmit={handleRefineSubmit}
+        >
           <div className="relative flex w-full">
             <input
               type="text"
-              placeholder="Refine the simulation... (e.g., 'Make the box heavier')"
+              name="prompt"
+              placeholder="Refine the training... (e.g., 'Increase learning rate')"
               className="w-full pl-6 pr-16 py-4 bg-gray-800 bg-opacity-80 backdrop-blur-md border border-gray-700 text-white rounded-full text-md focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all"
             />
             <button
@@ -186,7 +265,7 @@ function SimulationLayout() {
               <Send size={20} />
             </button>
           </div>
-        </div>
+        </form>
       </div>
 
       {/* Right Sidebar (LLM) */}
@@ -200,316 +279,167 @@ function SimulationLayout() {
 }
 
 // ------------------------------------------------------------------
-// 3. Re-usable components (Placeholders for now)
+// 3. Re-usable components
 // ------------------------------------------------------------------
 
-// This points to 'frontend/public/model.xml'
-const MODEL_XML_URL = '/model.xml';
-
-// MuJoCo will be loaded directly from public directory to avoid webpack bundling issues
-const MUJOCO_WASM_URL = '/mujoco_wasm.js';
-
+const getInitialData = () => [
+  { episode: 0, reward: 0, length: 0 },
+];
 
 /**
- * UPDATED: The 3D simulation viewport.
- * This component now *only* renders the Canvas.
- * The actual 3D scene and physics logic are in <PhysicsScene />
+ * NEW: The main dashboard for showing graphs.
+ * This component now connects to a WebSocket for live data.
  */
-function SimulationViewport({ isRunning, resetTrigger }: { isRunning: boolean, resetTrigger: number }) {
-  return (
-    <Canvas 
-      camera={{ position: [5, 5, 5], fov: 60 }} // Set initial camera position
-      className="w-full h-full"
-    >
-      {/* Suspense is a React feature that lets us show a fallback
-        (like a loading spinner) while child components are loading.
-        This is good practice for 3D scenes.
-      */}
-      <Suspense fallback={null}>
-        {/* We pass the control props down to the component
-          that is *inside* the Canvas. This component can
-          now safely use R3F hooks like useFrame.
-        */}
-        <PhysicsScene 
-          isRunning={isRunning}
-          resetTrigger={resetTrigger}
-        />
-      </Suspense>
-    </Canvas>
-  );
-}
+function DashboardContainer({ simulationId, isRunning, resetTrigger }: {
+  simulationId: string;
+  isRunning: boolean;
+  resetTrigger: number;
+}) {
+  const [data, setData] = useState(getInitialData());
 
-/**
- * NEW: Physics and 3D Scene Component
- * This component lives *inside* the Canvas and can safely use
- * R3F hooks like useFrame. It contains all the logic
- * that was previously in SimulationViewport.
- */
-function PhysicsScene({ isRunning, resetTrigger }: { isRunning: boolean, resetTrigger: number }) {
-  // <-- FIX 1 (continued): Use the imported THREE namespace for the type -->
-  const boxRef = useRef<THREE.Mesh>(null); // A React ref to get direct access to the 3D mesh
-  
-  // State to hold the initialized MuJoCo instances
-  // We use 'any' for now as we don't have the types for the MuJoCo module
-  const [mujoco, setMujoco] = useState<any>(null);
-  const [physicsModel, setPhysicsModel] = useState<any>(null);
-  const [physicsData, setPhysicsData] = useState<any>(null);
-
-  // 1. Load the Mujoco library and the physics model (XML)
+  // This effect connects to the WebSocket for live data
   useEffect(() => {
-    // Ensure we're on the client side
-    if (typeof window === 'undefined') {
-      return;
-    }
+    if (!simulationId) return;
 
-    // Function to initialize the physics engine
-    const initPhysics = async () => {
+    // Connect to the WebSocket (assumes FastAPI is on port 8000)
+    // Your API guy needs to build this endpoint
+    console.log(`Connecting to WebSocket: ws://localhost:8000/ws/train/${simulationId}`);
+    const ws = new WebSocket(`ws://localhost:8000/ws/train/${simulationId}`);
+
+    ws.onopen = () => {
+      console.log("WebSocket connected");
+      // Tell the backend to start/pause training
+      ws.send(JSON.stringify({ command: isRunning ? "run" : "pause" }));
+    };
+
+    // This is where new graph data arrives
+    ws.onmessage = (event) => {
       try {
-        console.log("Starting MuJoCo initialization...");
-        
-        // Load mujoco_wasm.js directly from public directory using dynamic import
-        // This avoids webpack bundling issues
-        console.log(`Loading mujoco_wasm.js from: ${MUJOCO_WASM_URL}`);
-        let loadMujoco: any;
-        try {
-          // Use dynamic import to load the ES6 module from public directory
-          // Use Function constructor to prevent webpack from trying to bundle it
-          const importModule = new Function('url', 'return import(url)');
-          const mujocoModule = await importModule(MUJOCO_WASM_URL);
-          // The module exports loadMujoco as default
-          loadMujoco = mujocoModule.default;
-          if (!loadMujoco || typeof loadMujoco !== 'function') {
-            throw new Error("loadMujoco not found or is not a function in mujoco_wasm.js module");
-          }
-          console.log("✓ mujoco_wasm.js loaded successfully.");
-        } catch (loadError: any) {
-          const errorMsg = loadError instanceof Error ? loadError.message : String(loadError);
-          throw new Error(`Failed to load mujoco_wasm.js: ${errorMsg}. Check that the file exists in the public directory.`);
+        const newDataPoint = JSON.parse(event.data);
+        // Expect data like: { "episode": 1, "reward": 10.5, "length": 150 }
+        if (newDataPoint.episode !== undefined) {
+          setData(currentData => [...currentData, newDataPoint]);
         }
-
-        // Wait for the Wasm module to be ready
-        console.log("Initializing MuJoCo Wasm module...");
-        const mujocoInstance = await loadMujoco();
-        if (!mujocoInstance) {
-          throw new Error("Failed to initialize MuJoCo Wasm module");
-        }
-        if (!mujocoInstance.FS) {
-          throw new Error("MuJoCo instance missing FS (filesystem) module");
-        }
-        if (!mujocoInstance.MjModel) {
-          throw new Error("MuJoCo instance missing MjModel class");
-        }
-        if (!mujocoInstance.MjData) {
-          throw new Error("MuJoCo instance missing MjData class");
-        }
-        setMujoco(mujocoInstance);
-        console.log("✓ MuJoCo Wasm module initialized.");
-
-        // Fetch the model XML file
-        console.log(`Fetching model from: ${MODEL_XML_URL}`);
-        const response = await fetch(MODEL_XML_URL);
-        if (!response.ok) {
-          throw new Error(`Failed to fetch model: ${response.status} ${response.statusText}. Check that model.xml exists in the public directory.`);
-        }
-        const modelXML = await response.text();
-        if (!modelXML || modelXML.trim().length === 0) {
-          throw new Error("Model XML file is empty");
-        }
-        console.log("✓ Model XML fetched successfully.");
-
-        // Set up the virtual filesystem (VFS) working directory
-        // Create a working directory and mount MEMFS
-        const workingDir = '/working';
-        try {
-          mujocoInstance.FS.mkdir(workingDir);
-          console.log(`✓ Created working directory: ${workingDir}`);
-        } catch (mkdirError: any) {
-          // Directory might already exist, which is fine
-          if (mkdirError && mkdirError.errno !== 17) { // 17 is EEXIST (directory exists)
-            console.warn(`Warning creating working directory: ${mkdirError}`);
-          }
-        }
-
-        // Mount MEMFS to the working directory
-        try {
-          mujocoInstance.FS.mount(mujocoInstance.MEMFS, { root: '.' }, workingDir);
-          console.log("✓ Mounted MEMFS to working directory.");
-        } catch (mountError: any) {
-          // Mount might already exist, which is fine
-          console.warn(`Warning mounting MEMFS: ${mountError}`);
-        }
-
-        // Write the model to the virtual filesystem (VFS)
-        // Use absolute path in the working directory
-        const vfsPath = `${workingDir}/model.xml`;
-        console.log(`Writing model to virtual filesystem at: ${vfsPath}`);
-        mujocoInstance.FS.writeFile(vfsPath, modelXML);
-        console.log("✓ Model written to virtual filesystem.");
-
-        // Verify the file was written
-        try {
-          const writtenContent = mujocoInstance.FS.readFile(vfsPath, { encoding: 'utf8' });
-          if (!writtenContent || writtenContent.length === 0) {
-            throw new Error("File written to VFS but appears empty");
-          }
-          console.log("✓ Verified model file in virtual filesystem.");
-        } catch (verifyError) {
-          throw new Error(`Failed to verify model file in VFS: ${verifyError}`);
-        }
-
-        // Load the model into the physics engine using MjModel.loadFromXML
-        console.log("Loading model into physics engine...");
-        const model = mujocoInstance.MjModel.loadFromXML(vfsPath);
-        if (!model) {
-          throw new Error("MjModel.loadFromXML returned null or undefined");
-        }
-        console.log("✓ Model loaded into physics engine.");
-        
-        // Initialize the simulation data structure using MjData constructor
-        const data = new mujocoInstance.MjData(model);
-        if (!data) {
-          throw new Error("MjData constructor returned null or undefined");
-        }
-        console.log("✓ Simulation data initialized.");
-        
-        setPhysicsModel(model);
-        setPhysicsData(data);
-        
-        console.log("%c✓ Physics simulation is ready!", "color: #00FF00; font-weight: bold;");
-
-      } catch (error) {
-        // Improved error logging - properly serialize error
-        let errorMessage = 'Unknown error';
-        let errorStack = undefined;
-        let errorName = undefined;
-        
-        if (error instanceof Error) {
-          errorMessage = error.message || 'Error without message';
-          errorStack = error.stack;
-          errorName = error.name;
-        } else if (typeof error === 'string') {
-          errorMessage = error;
-        } else if (error && typeof error === 'object') {
-          // Try to extract message from error object
-          errorMessage = (error as any).message || (error as any).toString() || JSON.stringify(error);
-        } else {
-          errorMessage = String(error);
-        }
-        
-        console.error("❌ Error initializing physics:");
-        console.error("  Error Name:", errorName || 'N/A');
-        console.error("  Error Message:", errorMessage);
-        if (errorStack) {
-          console.error("  Error Stack:", errorStack);
-        }
-        console.error("  Full Error Object:", error);
-        
-        // Also log to help with debugging
-        console.error("Debug info:", {
-          modelXmlUrl: MODEL_XML_URL,
-          windowMujoco: !!(window as any).Mujoco,
-          mujocoJsInstalled: true // We're using npm package now
-        });
+      } catch (err) {
+        console.error("Failed to parse WebSocket message:", err);
       }
     };
 
-    initPhysics();
+    ws.onerror = (err) => {
+      console.error("WebSocket error:", err);
+    };
 
-    // Cleanup function
+    ws.onclose = () => {
+      console.log("WebSocket disconnected");
+    };
+
+    // Cleanup: close the connection when the component unmounts
     return () => {
-      // Cleanup handled automatically
+      ws.close();
     };
-  }, []); // Empty dependency array ensures this runs only once on mount
+  }, [simulationId]); // Reconnect if the simulationId changes
 
-  // 2. Effect to handle simulation reset
+  // This effect sends run/pause commands to the WebSocket
   useEffect(() => {
-    if (resetTrigger > 0 && mujoco && physicsModel && physicsData) {
-      console.log("Resetting physics simulation state...");
-      // MjData has a reset method
-      if (physicsData.reset) {
-        physicsData.reset();
-      } else {
-        // Fallback: create new data
-        const newData = new mujoco.MjData(physicsModel);
-        setPhysicsData(newData);
-      }
+    // We can just log this for now, as the WebSocket isn't real yet.
+    // In a real app, you'd send a message:
+    // ws.send(JSON.stringify({ command: isRunning ? "run" : "pause" }));
+    console.log("Training state changed:", isRunning ? "RUNNING" : "PAUSED");
+  }, [isRunning]);
+
+  // This effect handles resetting the graphs
+  useEffect(() => {
+    if (resetTrigger > 0) {
+      setData(getInitialData());
+      // In a real app, you'd send a "reset" command:
+      // ws.send(JSON.stringify({ command: "reset" }));
+      console.log("Resetting training data");
     }
-  }, [resetTrigger, mujoco, physicsModel, physicsData]); // Dependencies
+  }, [resetTrigger]);
 
-  // 3. The Animation/Physics Loop
-  useFrame(() => {
-    // This hook is now safely inside the Canvas context
-    if (isRunning && mujoco && physicsModel && physicsData && boxRef.current) {
-      
-      // --- PHYSICS ---
-      // Use mj_step from the mujoco instance
-      mujoco.mj_step(physicsModel, physicsData);
-
-      // --- VISUALS ---
-      // Get the position and orientation of the box from the physics simulation.
-      // MuJoCo qpos for free joint: [pos.x, pos.y, pos.z, quat.w, quat.x, quat.y, quat.z]
-      const [x, y, z, w, qx, qy, qz] = physicsData.qpos; // <-- TYPO FIX (was ql)
-
-      // Update the 3D model's position in the Three.js scene
-      boxRef.current.position.set(x, y, z);
-      
-      // Update the 3D model's rotation (orientation)
-      // THREE.Quaternion.set expects (x, y, z, w)
-      boxRef.current.quaternion.set(qx, qy, qz, w); // <-- CORRECTED ORDER
-    }
-  });
-
-  // This component returns the 3D objects, not the canvas
   return (
-    <>
-      {/* Basic lighting */}
-      <ambientLight intensity={0.5} />
-      <directionalLight position={[10, 10, 5]} intensity={1} />
+    <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 h-full">
+      {/* Chart 1: Cumulative Reward */}
+      <div className="bg-gray-800 p-4 rounded-lg shadow-lg">
+        <h3 className="text-white text-lg font-semibold mb-4">Cumulative Reward per Episode</h3>
+        <ResponsiveContainer width="100%" height={300}>
+          <LineChart
+            data={data}
+            margin={{ top: 5, right: 20, left: -10, bottom: 5 }}
+          >
+            <CartesianGrid strokeDasharray="3 3" stroke="#4a5568" />
+            <XAxis dataKey="episode" stroke="#a0aec0" />
+            <YAxis stroke="#a0aec0" />
+            <Tooltip
+              contentStyle={{ backgroundColor: '#2d3748', border: 'none' }}
+              labelStyle={{ color: '#e2e8f0' }}
+            />
+            <Legend wrapperStyle={{ color: '#e2e8f0' }} />
+            <Line
+              type="monotone"
+              dataKey="reward"
+              stroke="#4299e1" // Blue line
+              strokeWidth={2}
+              dot={false}
+              isAnimationActive={false}
+            />
+          </LineChart>
+        </ResponsiveContainer>
+      </div>
 
-      {/* A simple red box. */}
-      <mesh ref={boxRef} position={[0, 0, 1]}>
-        {/* The geom in the XML is size "0.1 0.1 0.1", which is radius.
-          boxGeometry uses full width/height/depth, so "0.2 0.2 0.2".
-        */}
-        <boxGeometry args={[0.2, 0.2, 0.2]} />
-        <meshStandardMaterial color="red" />
-      </mesh>
-
-      {/* A grid on the XZ plane. */}
-      <Grid 
-        infiniteGrid 
-        sectionColor={"#555555"} 
-        sectionSize={10} 
-        fadeDistance={50} 
-        fadeStrength={5}
-        position={[0, -0.01, 0]} // Position grid slightly below the physics plane
-      />
-
-      {/* OrbitControls allows you to control the camera with the mouse */}
-      <OrbitControls makeDefault />
-    </>
+      {/* Chart 2: Episode Length */}
+      <div className="bg-gray-800 p-4 rounded-lg shadow-lg">
+        <h3 className="text-white text-lg font-semibold mb-4">Episode Length</h3>
+        <ResponsiveContainer width="100%" height={300}>
+          <LineChart
+            data={data}
+            margin={{ top: 5, right: 20, left: -10, bottom: 5 }}
+          >
+            <CartesianGrid strokeDasharray="3 3" stroke="#4a5568" />
+            <XAxis dataKey="episode" stroke="#a0aec0" />
+            <YAxis stroke="#a0aec0" />
+            <Tooltip
+              contentStyle={{ backgroundColor: '#2d3748', border: 'none' }}
+              labelStyle={{ color: '#e2e8f0' }}
+            />
+            <Legend wrapperStyle={{ color: '#e2e8f0' }} />
+            <Line
+              type="monotone"
+              dataKey="length"
+              stroke="#38b2ac" // Teal line
+              strokeWidth={2}
+              dot={false}
+              isAnimationActive={false}
+            />
+          </LineChart>
+        </ResponsiveContainer>
+      </div>
+    </div>
   );
 }
 
 
 /**
  * Left Sidebar Panel (Inspector)
- * This is a placeholder for your UI.
  */
 function InspectorPanel() {
   return (
     <div>
-      <h3 className="text-lg font-semibold text-white mb-4">Inspector</h3>
+      <h3 className="text-lg font-semibold text-white mb-4">RL Parameters</h3>
       <div className="space-y-4">
-        <div className="text-gray-400 text-sm">
-          <p className="font-medium text-white mb-1">Selected: (none)</p>
-          <p>Select an object in the scene to see its properties.</p>
-        </div>
         <div className="space-y-2">
-          <label className="text-sm font-medium text-gray-300 block">Gravity</label>
+          <label className="text-sm font-medium text-gray-300 block">Learning Rate</label>
           <input 
             type="text" 
-            defaultValue="-9.81" 
+            defaultValue="0.001" 
+            className="w-full p-2 bg-gray-700 rounded-md text-white text-sm border border-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500" 
+          />
+        </div>
+        <div className="space-y-2">
+          <label className="text-sm font-medium text-gray-300 block">Discount Factor (Gamma)</label>
+          <input 
+            type="text" 
+            defaultValue="0.99" 
             className="w-full p-2 bg-gray-700 rounded-md text-white text-sm border border-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500" 
           />
         </div>
@@ -519,25 +449,60 @@ function InspectorPanel() {
 }
 
 /**
- * Right Sidebar Panel (LLM)
- * This is a placeholder for your UI.
+ * Right Sidebar Panel (LLM) - Now calls your API
  */
 function LLMPanel() {
+  const [prompt, setPrompt] = useState('You are an RL agent optimizing a humanoid walker...');
+  const [isUpdating, setIsUpdating] = useState(false);
+
+  const handlePromptUpdate = async () => {
+    setIsUpdating(true);
+    try {
+      // *** THIS NOW CALLS YOUR FASTAPI ENDPOINT ***
+      const response = await fetch('http://localhost:8000/config/system_prompt', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt: prompt }),
+      });
+      if (!response.ok) throw new Error("Failed to update prompt");
+      const result = await response.json();
+      if (result.status === true) {
+        console.log("System prompt updated successfully");
+      }
+    } catch (err) {
+      console.error("Error updating prompt:", err);
+    } finally {
+      setIsUpdating(false);
+    }
+  };
+
   return (
     <div>
-      <h3 className="text-lg font-semibold text-white mb-4">LLM Controls</h3>
+      <h3 className="text-lg font-semibold text-white mb-4">LLM Agent</h3>
       <div className="space-y-4">
         <div className="space-y-2">
           <label className="text-sm font-medium text-gray-300 block">System Prompt</label>
           <textarea 
             rows={5}
-            defaultValue="You are a helpful assistant for MuJoCo physics simulations..."
+            value={prompt}
+            onChange={(e) => setPrompt(e.target.value)}
             className="w-full p-2 bg-gray-700 rounded-md text-white text-sm border border-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500" 
           />
         </div>
-        <button className="w-full py-2 bg-blue-600 rounded-md text-white font-medium hover:bg-blue-700 transition-colors">
-          Update Prompt
+        <button 
+          onClick={handlePromptUpdate}
+          disabled={isUpdating}
+          className="w-full py-2 bg-blue-600 rounded-md text-white font-medium hover:bg-blue-700 transition-colors disabled:opacity-50"
+        >
+          {isUpdating ? "Updating..." : "Update Prompt"}
         </button>
+        <div className="space-y-2">
+          <label className="text-sm font-medium text-gray-300 block">Agent Log</label>
+          <div className="w-full h-48 p-2 bg-gray-900 rounded-md text-gray-400 text-xs font-mono overflow-y-auto">
+            <p>Waiting for training to start...</p>
+            {/* This log could also be populated by WebSocket messages */}
+          </div>
+        </div>
       </div>
     </div>
   );
