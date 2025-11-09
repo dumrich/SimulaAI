@@ -1,0 +1,5 @@
+{
+  file: "mjspecs/humanoid.xml",
+  trainable: true,
+  trainer: "humanoid_trainer"
+}
