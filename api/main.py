@@ -1,6 +1,7 @@
 from fastapi import FastAPI, HTTPException 
 from pydantic import BaseModel, Field 
 from typing import List, Dict, Any
+import requests
 import uuid
 import sys
 import os
@@ -88,6 +89,52 @@ def handlePrompt(request: Prompt):
     
     ### add function to querry the prompt for chat bot 
     success = bool ### add correct fucntion call here 
-    return chatbotResponse(status = success)
+    return responseConfirmation(status = success)
 
-    
+def generate_mujoco_xml(prompt: str) -> str:
+    headers = {
+        "Authorization": f"Bearer {os.getenv('OPENROUTER_API_KEY')}",
+        "Content-Type": "application/json"
+    }
+
+    body = {
+        "model": "openai/gpt-4o",
+        "messages": [
+            {
+                "role": "system", 
+                "content": """The user will ask for their desired specifications of the robot, and you need to choose a base model to use from this list:
+                
+                **TEMPLATE LIST (INDEX)**
+                **humanoid**: A bipedal, human-like robot with arms and legs, suitable for walking, running, and manipulation. Use for any general bipedal task.
+                **ant**: A quadrupedal (four-legged) insect-like robot, suitable for complex 3D motion on rough terrain.
+                **cheetah**: A flexible 2D quadruped designed for high-speed running
+                **hopper**: A singular 2D robot leg that only jumps and lands
+                **pusher**: A simple planar robot tasked with pushing a block or object to a target location. Use for object manipulation tasks.
+                **swimmer**: A multi-segmented robot designed for locomotion in a fluid environment (water), typically used in 3D.
+                **shoulder**: A simplified arm or manipulator model focusing on rotational movement, often used for reaching or balancing tasks.
+                **walker**: A simple 2D two-legged robot, often used for steady, slow horizontal locomotion experiments.
+                
+                **SELECTION RULES**
+                
+                1. Analyze the user's requests for keywords that may match with the descriptions above (e.g. \"four legs\", \"human\", \"arm movement\")
+                2. Your final output MUST be ONLY the exact template name from the INDEX list. Do not use any other words or explanation.
+                3. If no template is suitable, output \"NONE\""""
+            },
+            {
+                "role": "user", 
+                "content": f"Match the correct template for the following prompt: {prompt}"
+            }
+        ]
+    }
+
+    try:
+        response = requests.post(url="https://openrouter.ai/api/v1/chat/completions", headers=headers, json=body, timeout=30)
+        
+        if response.status_code == 200:
+            data = response.json()
+            print(data)
+            return data['choices'][0]['message']['content'].strip()
+        else:
+            raise HTTPException(status_code=response.status_code, detail=f"Request failed: {response.text}",)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error retrieving MuJoCo file: {str(e)}")
