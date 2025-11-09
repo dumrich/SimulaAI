@@ -52,11 +52,11 @@ class PlanEditsResponse(BaseModel):
     edits: List[EditInstruction]
 
 class PlanEditsRequest(BaseModel):
-    base_model: str = Field(..., description="Base model key, e.g. 'humanoid'")
+    xml_path: str = Field(..., description="Base model key, e.g. 'humanoid'")
     prompt: str = Field(..., description="User request describing how to modify the robot")
 
 class ApplyEditsRequest(BaseModel):
-    base_model: str = Field(..., description="Base model key, e.g. 'humanoid'")
+    xml_path: str = Field(..., description="Base model key, e.g. 'humanoid'")
     edits: List[EditInstruction] = Field(..., description="List of edit instructions")
 
 class ApplyEditsResponse(BaseModel):
@@ -257,7 +257,7 @@ def simulation_generate(request: Prompt):
     3) Returns simulation_id + XML string.
     """
     try:
-        template = generate_mujoco_template(request.prompt)
+        template = generate_mujoco_xml(request.prompt)
         if not template or template not in xml_map:
             raise HTTPException(status_code=400, detail="No suitable template found for the prompt.")
 
@@ -284,12 +284,8 @@ def simulation_plan_edits(request: PlanEditsRequest):
     """
     Calls LLM to create an edit plan for the specified base model.
     """
-    base_xml_path = xml_map.get(request.base_model)
-    if not base_xml_path:
-        raise HTTPException(status_code=400, detail="Unknown base_model.")
-
     try:
-        plan = llm_plan_edits(request.prompt, base_xml_path)
+        plan = llm_plan_edits(request.prompt, request.xml_path)
         # Validate into Pydantic model to ensure shape
         edits = [EditInstruction(**e) for e in plan.get("edits", [])]
         return PlanEditsResponse(edits=edits)
@@ -302,26 +298,40 @@ def simulation_apply_edits(request: ApplyEditsRequest):
     Applies a given list of edits to the chosen base model XML
     and returns a new simulation_id + edited XML.
     """
-    base_xml_path = xml_map.get(request.base_model)
-    if not base_xml_path:
-        raise HTTPException(status_code=400, detail="Unknown base_model.")
-
     try:
-        edited_xml = apply_edits_to_xml(base_xml_path, request.edits)
+        # Resolve XML path properly
+        xml_path = request.xml_path
+        if not os.path.isabs(xml_path):
+            xml_path = os.path.join(os.getcwd(), xml_path)
+
+        if not os.path.exists(xml_path):
+            raise FileNotFoundError(f"XML file not found: {xml_path}")
+
+        # Apply edits using SpecParser
+        edited_xml = apply_edits_to_xml(xml_path, request.edits)
         simulation_id = f"sim_{uuid.uuid4().hex[:8]}"
 
-        # Optional: persist edited XML on disk
-        out_dir = os.path.dirname(base_xml_path)
-        out_path = os.path.join(out_dir, f"{request.base_model}_{simulation_id}.xml")
+        # ✅ Save the new XML in mujoco/mjspecs with a clean filename
+        out_dir = "mujoco/mjspecs"
+        base_name = os.path.splitext(os.path.basename(xml_path))[0]
+        out_path = os.path.join(out_dir, f"{base_name}_{simulation_id}.xml")
+
+        os.makedirs(out_dir, exist_ok=True)
         with open(out_path, "w") as f:
             f.write(edited_xml)
+
+        print(f"✅ Edited XML saved to: {out_path}")
 
         return ApplyEditsResponse(
             simulation_id=simulation_id,
             model_xml=edited_xml,
         )
+
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error applying edits: {e}")
+        import traceback
+        print("=== APPLY EDITS FAILED ===")
+        traceback.print_exc()  # shows full internal stack trace
+        raise HTTPException(status_code=500, detail=f"Error applying edits: {str(e)}")
 
 @api.post("/config/system_prompt", response_model=ResponseConfirmation)
 def handle_prompt_config(request: Prompt):

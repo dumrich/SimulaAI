@@ -4,10 +4,7 @@ import copy
 
 class SpecParser:
     def __init__(self, filename):
-        if filename.startswith('../'):
-            self.filename = filename
-        else:
-            self.filename = f'../mjspecs/{filename}'
+        self.filename = filename
         self.et = None
         self.root = None
         self.worldbody = None
