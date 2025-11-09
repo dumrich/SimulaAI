@@ -38,17 +38,17 @@ class SpecParser:
 
         return attrs
 
-    def _find_elements_recursive(self, parent, tag_name):
-        """Recursively find all elements with given tag name under parent"""
+    def _find_elements_in_worldbody_children(self, parent, tag_name):
+        """Find elements with given tag name only in direct children of worldbody"""
         elements = {}
 
-        # Find direct children
+        # Find direct children of worldbody
         for element in parent.findall(tag_name):
             name = element.get('name', f"{tag_name}_{len(elements)}")
             elements[name] = self._extract_element_attributes(element)
 
-        # Recursively search in body elements
-        for body in parent.findall('.//body'):
+        # Find elements in direct body children of worldbody only (no nested bodies)
+        for body in parent.findall('body'):
             for element in body.findall(tag_name):
                 name = element.get('name', f"{tag_name}_{len(elements)}")
                 elements[name] = self._extract_element_attributes(element)
@@ -56,14 +56,14 @@ class SpecParser:
         return elements
 
     def get_bodies_hashmap(self):
-        """Generate hashmap for all body elements under worldbody"""
+        """Generate hashmap for body elements that are direct children of worldbody"""
         if self.worldbody is None:
             raise ValueError("XML file not loaded. Call load_file() first.")
 
         bodies = {}
 
-        # Find all body elements recursively
-        for body in self.worldbody.findall('.//body'):
+        # Find only direct body children of worldbody
+        for body in self.worldbody.findall('body'):
             name = body.get('name', f"body_{len(bodies)}")
             bodies[name] = self._extract_element_attributes(body)
 
@@ -74,28 +74,28 @@ class SpecParser:
         if self.worldbody is None:
             raise ValueError("XML file not loaded. Call load_file() first.")
 
-        return self._find_elements_recursive(self.worldbody, 'geom')
+        return self._find_elements_in_worldbody_children(self.worldbody, 'geom')
 
     def get_joints_hashmap(self):
         """Generate hashmap for all joint elements under worldbody"""
         if self.worldbody is None:
             raise ValueError("XML file not loaded. Call load_file() first.")
 
-        return self._find_elements_recursive(self.worldbody, 'joint')
+        return self._find_elements_in_worldbody_children(self.worldbody, 'joint')
 
     def get_tendons_hashmap(self):
         """Generate hashmap for all tendon elements under worldbody"""
         if self.worldbody is None:
             raise ValueError("XML file not loaded. Call load_file() first.")
 
-        return self._find_elements_recursive(self.worldbody, 'tendon')
+        return self._find_elements_in_worldbody_children(self.worldbody, 'tendon')
 
     def get_motors_hashmap(self):
         """Generate hashmap for all motor elements under worldbody"""
         if self.worldbody is None:
             raise ValueError("XML file not loaded. Call load_file() first.")
 
-        return self._find_elements_recursive(self.worldbody, 'motor')
+        return self._find_elements_in_worldbody_children(self.worldbody, 'motor')
 
     def get_all_hashmaps(self):
         """Generate hashmaps for all supported elements (bodies, geoms, joints, tendons, motors)"""
