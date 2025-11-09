@@ -1,12 +1,14 @@
-from fastapi import FastAPI, HTTPException 
-from pydantic import BaseModel, Field 
-from typing import List, Dict, Any
-from core.parser import SpecParser
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel, Field
+from dotenv import load_dotenv
+from typing import List, Literal, Optional
+from core.parser import SpecParser  # make sure this import path is correct
+
 import requests
 import uuid
-import sys
+import json
 import os
-from core.parser import SpecParser
+import re
 
 #### import the core module files from core dir at some point
 # Add parent directory to path to import core module
@@ -18,6 +20,7 @@ from core.parser import SpecParser
 #delete for deleting a todo / info 
 
 api = FastAPI()
+load_dotenv()
 
 xml_map = {
     "humanoid": "mujoco/mjspecs/humanoid.xml",
@@ -29,21 +32,41 @@ xml_map = {
     "shoulder": "mujoco/mjspecs/shoulder.xml",
 }
 
-# Request model for generating simulation / prompts 
+# Models:
+
 class Prompt(BaseModel):
-    prompt: str = Field(..., description="User prompt describing the desired simulation")
+    prompt: str = Field(..., description="User prompt describing the desired simulation or edits")
 
-
-# Response model for simulation generation
 class GenerateSimulationResponse(BaseModel):
     simulation_id: str = Field(..., description="Unique identifier for the simulation")
-    model_spec: SpecParser = Field(..., description="Complete MuJoCo XML string for the simulation")
+    model_xml: str = Field(..., description="Complete MuJoCo XML string for the chosen base model")
 
+class EditInstruction(BaseModel):
+    action: Literal["set_attribute"]
+    element_type: Literal["body", "geom", "joint", "tendon", "motor"]
+    element_name: str
+    attribute_name: str
+    attribute_value: str
 
-class initalText(BaseModel):
-    text : str = Field(..., description = "straight text from abhi function(xml fil path)")
+class PlanEditsResponse(BaseModel):
+    edits: List[EditInstruction]
 
-### Landing page first chat bot request at the beginning 
+class PlanEditsRequest(BaseModel):
+    base_model: str = Field(..., description="Base model key, e.g. 'humanoid'")
+    prompt: str = Field(..., description="User request describing how to modify the robot")
+
+class ApplyEditsRequest(BaseModel):
+    base_model: str = Field(..., description="Base model key, e.g. 'humanoid'")
+    edits: List[EditInstruction] = Field(..., description="List of edit instructions")
+
+class ApplyEditsResponse(BaseModel):
+    simulation_id: str = Field(..., description="Unique identifier for the edited simulation")
+    model_xml: str = Field(..., description="Edited MuJoCo XML string")
+
+class ResponseConfirmation(BaseModel):
+    status: bool
+
+### first chat bot request at the beginning 
 @api.post('/simulation/generate', response_model=GenerateSimulationResponse)
 def generate_simulation(request: Prompt):
     try:
@@ -55,7 +78,7 @@ def generate_simulation(request: Prompt):
         
         return GenerateSimulationResponse(
             simulation_id=simulation_id,
-            model_xml=SpecParser(model_xml_path)
+            model_xml=model_xml_path
         )
         
     
@@ -69,32 +92,89 @@ class RefineSimulationRequest(GenerateSimulationResponse):
     prompt : str = Field(..., description="user prompt for refinement")
 
     
-#bottom bar  imualted model refine with the user prompt 
-@api.post('/simulation/refine', response_model=GenerateSimulationResponse)
-def refine_simulation(request: RefineSimulationRequest):
-    
-    simulation_id = request.simulation_id
-    current_model_xml = request.model_xml
-    user_prompt = request.prompt
-    
-    #### return refine(simulation_id, current_model_xml, user_prompt) call refine fucntion form other file;
+#simualted model refine with the user prompt 
+def llm_plan_edits(user_request: str, xml_path: str) -> dict:
+    # Open and read the XML file
+    with open(xml_path, "r") as f:
+        xml_string = f.read()
 
-# response call for true/false confirmation of prompt + other data
-class chatbotResponse(BaseModel):
-    status : bool  
+    headers = {
+        "Authorization": f"Bearer {os.getenv('OPENROUTER_API_KEY')}",
+        "Content-Type": "application/json"
+    }
 
-#prompt + other data from front end
-class chatbotData(Prompt):
-    model_xml: str = Field(..., description="Complete MuJoCo XML string for the simulation")
-    
+    system_prompt = """
+        You are a MuJoCo XML editing assistant.
 
-#Left bar LLM chat bot function 
-@api.post('/config/system_prompt', response_model = chatbotResponse)
-def handlePrompt(request: Prompt):
+        You receive:
+        1) The current MuJoCo XML.
+        2) A natural language request about how to modify the robot.
+
+        You MUST respond ONLY as a JSON object with this schema:
+
+        {
+            "edits": [
+                {
+                    "action": "set_attribute",
+                    "element_type": "body" | "geom" | "joint" | "tendon" | "motor",
+                    "element_name": "string (name attribute in XML)",
+                    "attribute_name": "string",
+                    "attribute_value": "string"
+                }
+            ]
+        }
+
+        Tips:
+        - Changing the color requires changing all <geom> tags.
+        - When increasing/decreasing size of the robot, you must also edit the positions of each XML tag accordingly
+        - User will be vague: assume all changes are incremental unless written otherwise.
+
+        Rules:
+        - Only use names & attributes that actually exist in the provided XML.
+        - Do NOT invent new top-level bodies/joints unless explicitly asked.
+        - Do NOT include any explanation, only include the changes
+        - If you physically cannot honor the user's request, output \"NONE\""""
     
-    ### add function to querry the prompt for chat bot 
-    success = bool ### add correct fucntion call here 
-    return responseConfirmation(status = success)
+    user_prompt = f"Here are the relevant XML details: {xml_string} Here is the user's request: {user_request}"
+
+    body = {
+        "model": "openai/gpt-4o",
+        "messages": [
+            { "role": "system", "content": system_prompt },
+            { "role": "user", "content": user_prompt }
+        ]
+    }
+
+    try:
+        response = requests.post(url="https://openrouter.ai/api/v1/chat/completions", headers=headers, json=body, timeout=30)
+        
+        if response.status_code == 200:
+            data = response.json()
+            raw_output = data['choices'][0]['message']['content'].strip()
+
+            # Check if the output is None
+            if (data['choices'][0]['message']['content'].strip() == "NONE"):
+                print("Request could not be honored.")
+                return ""
+
+            # Clean output
+            cleaned = re.sub(r"^json\\n|```|^```json", "", raw_output).strip()
+            cleaned = cleaned.replace("\\n", "\n")
+
+            # 3. Now parse as JSON
+            json_str_match = re.search(r"\{.*\}", cleaned, re.DOTALL)
+            if json_str_match:
+                json_str = json_str_match.group(0)
+                plan = json.loads(json_str)
+                print("✅ Parsed successfully!")
+            else:
+                print("❌ No JSON object found.")
+
+            return plan
+        else:
+            raise HTTPException(status_code=response.status_code, detail=f"Request failed: {response.text}",)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error retrieving refinement params: {str(e)}")
 
 def generate_mujoco_xml(prompt: str) -> str:
     headers = {
@@ -136,9 +216,121 @@ def generate_mujoco_xml(prompt: str) -> str:
         
         if response.status_code == 200:
             data = response.json()
-            print(data)
             return xml_map.get(data['choices'][0]['message']['content'].strip(), None)
         else:
             raise HTTPException(status_code=response.status_code, detail=f"Request failed: {response.text}",)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error retrieving MuJoCo file: {str(e)}")
+    
+def apply_edits_to_xml(base_xml_path: str, edits: List[EditInstruction]) -> str:
+    """
+    Internal helper:
+    Loads XML via SpecParser, applies edits, returns edited XML string.
+    """
+    if not os.path.exists(base_xml_path):
+        raise RuntimeError(f"Base XML not found: {base_xml_path}")
+
+    parser = SpecParser(base_xml_path)
+    parser.load_file()
+
+    for edit in edits:
+        if edit.action != "set_attribute":
+            # If you later add more actions, handle them here
+            continue
+        try:
+            parser.set_attribute(
+                edit.element_type,
+                edit.element_name,
+                edit.attribute_name,
+                edit.attribute_value,
+            )
+        except Exception as e:
+            # You can choose to raise instead, depending on how strict you want this
+            print(f"Failed to set {edit.element_type}:{edit.element_name} {edit.attribute_name}={edit.attribute_value}: {e}")
+
+    return parser.to_string(pretty_print=True)
+
+# ---------- API Endpoints ----------
+
+@api.post("/simulation/generate", response_model=GenerateSimulationResponse)
+def simulation_generate(request: Prompt):
+    """
+    1) Uses LLM to pick a base template (humanoid, bug, etc.).
+    2) Loads the corresponding XML.
+    3) Returns simulation_id + XML string.
+    """
+    try:
+        template = generate_mujoco_template(request.prompt)
+        if not template or template not in xml_map:
+            raise HTTPException(status_code=400, detail="No suitable template found for the prompt.")
+
+        xml_path = xml_map[template]
+        if not os.path.exists(xml_path):
+            raise HTTPException(status_code=500, detail=f"Base XML file not found for template '{template}'.")
+
+        with open(xml_path, "r") as f:
+            xml_string = f.read()
+
+        simulation_id = f"sim_{uuid.uuid4().hex[:8]}"
+
+        return GenerateSimulationResponse(
+            simulation_id=simulation_id,
+            model_xml=xml_string,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error generating simulation: {e}")
+
+@api.post("/simulation/plan_edits", response_model=PlanEditsResponse)
+def simulation_plan_edits(request: PlanEditsRequest):
+    """
+    Calls LLM to create an edit plan for the specified base model.
+    """
+    base_xml_path = xml_map.get(request.base_model)
+    if not base_xml_path:
+        raise HTTPException(status_code=400, detail="Unknown base_model.")
+
+    try:
+        plan = llm_plan_edits(request.prompt, base_xml_path)
+        # Validate into Pydantic model to ensure shape
+        edits = [EditInstruction(**e) for e in plan.get("edits", [])]
+        return PlanEditsResponse(edits=edits)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error planning edits: {e}")
+
+@api.post("/simulation/apply_edits", response_model=ApplyEditsResponse)
+def simulation_apply_edits(request: ApplyEditsRequest):
+    """
+    Applies a given list of edits to the chosen base model XML
+    and returns a new simulation_id + edited XML.
+    """
+    base_xml_path = xml_map.get(request.base_model)
+    if not base_xml_path:
+        raise HTTPException(status_code=400, detail="Unknown base_model.")
+
+    try:
+        edited_xml = apply_edits_to_xml(base_xml_path, request.edits)
+        simulation_id = f"sim_{uuid.uuid4().hex[:8]}"
+
+        # Optional: persist edited XML on disk
+        out_dir = os.path.dirname(base_xml_path)
+        out_path = os.path.join(out_dir, f"{request.base_model}_{simulation_id}.xml")
+        with open(out_path, "w") as f:
+            f.write(edited_xml)
+
+        return ApplyEditsResponse(
+            simulation_id=simulation_id,
+            model_xml=edited_xml,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error applying edits: {e}")
+
+@api.post("/config/system_prompt", response_model=ResponseConfirmation)
+def handle_prompt_config(request: Prompt):
+    """
+    Placeholder endpoint to accept/update a system prompt config.
+    Right now: just acknowledges receipt.
+    """
+    # You could store request.prompt in memory/DB/config if needed.
+    return ResponseConfirmation(status=True)
