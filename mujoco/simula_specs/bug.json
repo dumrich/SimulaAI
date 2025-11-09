@@ -1,0 +1,5 @@
+{
+  model: "bug.xml",
+  trainable: true,
+  trainer: "bug_trainer"
+}
