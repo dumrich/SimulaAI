@@ -1,6 +1,7 @@
 from fastapi import FastAPI, HTTPException 
 from pydantic import BaseModel, Field 
 from typing import List, Dict, Any
+from core.parser import SpecParser
 import requests
 import uuid
 import sys
@@ -17,6 +18,15 @@ import os
 
 api = FastAPI()
 
+xml_map = {
+    "humanoid": "mujoco/mjspecs/humanoid.xml",
+    "bug": "mujoco/mjspecs/bug.xml",
+    "cheetah": "mujoco/mjspecs/cheetah.xml",
+    "hopper": "mujoco/mjspecs/hopper.xml",
+    "pusher": "mujoco/mjspecs/pusher.xml",
+    "swimmer": "mujoco/mjspecs/swimmer.xml",
+    "shoulder": "mujoco/mjspecs/shoulder.xml",
+}
 
 # Request model for generating simulation / prompts 
 class Prompt(BaseModel):
@@ -26,7 +36,7 @@ class Prompt(BaseModel):
 # Response model for simulation generation
 class GenerateSimulationResponse(BaseModel):
     simulation_id: str = Field(..., description="Unique identifier for the simulation")
-    model_xml: str = Field(..., description="Complete MuJoCo XML string for the simulation")
+    model_spec: SpecParser = Field(..., description="Complete MuJoCo XML string for the simulation")
 
 
 ### first chat bot request at the beginning 
@@ -37,11 +47,11 @@ def generate_simulation(request: Prompt):
         simulation_id = f"sim_{uuid.uuid4().hex[:8]}" ## may or may not need this 
         
         #### Call the core module to generate MuJoCo XML from the prompt placeholder 
-        model_xml = generate_mujoco_xml(request.prompt) 
+        model_xml_path = generate_mujoco_xml(request.prompt) 
         
         return GenerateSimulationResponse(
             simulation_id=simulation_id,
-            model_xml=model_xml
+            model_xml=SpecParser(model_xml_path)
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error generating simulation: {str(e)}")
@@ -89,13 +99,12 @@ def generate_mujoco_xml(prompt: str) -> str:
                 
                 **TEMPLATE LIST (INDEX)**
                 **humanoid**: A bipedal, human-like robot with arms and legs, suitable for walking, running, and manipulation. Use for any general bipedal task.
-                **ant**: A quadrupedal (four-legged) insect-like robot, suitable for complex 3D motion on rough terrain.
+                **bug**: A quadrupedal (four-legged) insect-like robot, suitable for complex 3D motion on rough terrain.
                 **cheetah**: A flexible 2D quadruped designed for high-speed running
                 **hopper**: A singular 2D robot leg that only jumps and lands
                 **pusher**: A simple planar robot tasked with pushing a block or object to a target location. Use for object manipulation tasks.
                 **swimmer**: A multi-segmented robot designed for locomotion in a fluid environment (water), typically used in 3D.
                 **shoulder**: A simplified arm or manipulator model focusing on rotational movement, often used for reaching or balancing tasks.
-                **walker**: A simple 2D two-legged robot, often used for steady, slow horizontal locomotion experiments.
                 
                 **SELECTION RULES**
                 
@@ -116,7 +125,7 @@ def generate_mujoco_xml(prompt: str) -> str:
         if response.status_code == 200:
             data = response.json()
             print(data)
-            return data['choices'][0]['message']['content'].strip()
+            return xml_map.get(data['choices'][0]['message']['content'].strip(), None)
         else:
             raise HTTPException(status_code=response.status_code, detail=f"Request failed: {response.text}",)
     except Exception as e:
